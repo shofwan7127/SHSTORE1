@@ -1,0 +1,576 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <!-- ... Kode CSS yang sama persis ... -->
+    <style>
+        /* ... Semua kode CSS tetap sama ... */
+    </style>
+</head>
+<body>
+    <!-- ... Semua kode HTML tetap sama ... -->
+
+    <script>
+        // =================================================================
+        //                 VARIABEL KONSTANTA GLOBAL - DIUBAH
+        // =================================================================
+        const FORM_ELEMENT_IDS = [
+            'idPemesan', 
+            'namaProdukDisplay', 
+            'jenisProduk', 
+            'jumlahJamJoki', 
+            'hargaProduk', 
+            'nomorInvoice', 
+            'viaTransaksi', 
+            'metodePembayaran', 
+            'statusTransaksi', 
+            'statusPembayaran', 
+            'pesanTransaksi'
+        ];
+        
+        // Hapus localStorage, ganti dengan API endpoint
+        const API_ENDPOINT = 'api.php'; // File PHP untuk menangani data
+        let countdownInterval;
+        let historyInterval;
+        let currentFilterStatus = 'All';
+        let historyCache = []; // Cache sementara
+
+        // =================================================================
+        //                 FUNGSI UTILITAS WAKTU (TETAP SAMA)
+        // =================================================================
+        // ... Semua fungsi waktu tetap sama ...
+
+        // =================================================================
+        //                 FUNGSI MANAJEMEN NOTA (DIUBAH UNTUK PHP)
+        // =================================================================
+        async function loadNotaHistory() {
+            try {
+                const response = await fetch(`${API_ENDPOINT}?action=getHistory`);
+                if (!response.ok) throw new Error('Gagal mengambil data');
+                
+                const data = await response.json();
+                historyCache = data;
+                return data;
+            } catch (error) {
+                console.error('Error loading history:', error);
+                showNotification('Gagal memuat riwayat transaksi', 'error');
+                return [];
+            }
+        }
+
+        async function saveNotaHistory(notaData) {
+            try {
+                const formData = new FormData();
+                formData.append('action', 'saveNota');
+                formData.append('notaData', JSON.stringify(notaData));
+                
+                const response = await fetch(API_ENDPOINT, {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!response.ok) throw new Error('Gagal menyimpan data');
+                
+                const result = await response.json();
+                return result.success;
+            } catch (error) {
+                console.error('Error saving nota:', error);
+                showNotification('Gagal menyimpan nota', 'error');
+                return false;
+            }
+        }
+
+        async function getNotaByInvoice(invoiceNumber) {
+            const history = await loadNotaHistory();
+            return history.find(item => item.nomorInvoice === invoiceNumber);
+        }
+
+        async function deleteNotaFromServer(invoiceNumber) {
+            try {
+                const formData = new FormData();
+                formData.append('action', 'deleteNota');
+                formData.append('invoiceNumber', invoiceNumber);
+                
+                const response = await fetch(API_ENDPOINT, {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!response.ok) throw new Error('Gagal menghapus data');
+                
+                const result = await response.json();
+                return result.success;
+            } catch (error) {
+                console.error('Error deleting nota:', error);
+                showNotification('Gagal menghapus nota', 'error');
+                return false;
+            }
+        }
+
+        async function updateNotaOnServer(notaData) {
+            try {
+                const formData = new FormData();
+                formData.append('action', 'updateNota');
+                formData.append('notaData', JSON.stringify(notaData));
+                
+                const response = await fetch(API_ENDPOINT, {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!response.ok) throw new Error('Gagal memperbarui data');
+                
+                const result = await response.json();
+                return result.success;
+            } catch (error) {
+                console.error('Error updating nota:', error);
+                showNotification('Gagal memperbarui nota', 'error');
+                return false;
+            }
+        }
+
+        // Fungsi pauseNota dengan server update
+        async function pauseNota(invoiceNumber) {
+            let history = await loadNotaHistory();
+            const index = history.findIndex(item => item.nomorInvoice === invoiceNumber);
+
+            if (index !== -1 && history[index].statusTransaksi === 'Proccess') {
+                const data = history[index];
+                data.isPaused = true;
+                data.pauseTimeISO = getCurrentDateTimeISO();
+                
+                if (await updateNotaOnServer(data)) {
+                    historyCache = history; // Update cache
+                    await renderNotaHistoryCards();
+                    showNotification(`Nota ${invoiceNumber} berhasil dijeda.`, 'info');
+                }
+            }
+        }
+
+        // Fungsi resumeNota dengan server update
+        async function resumeNota(invoiceNumber) {
+            let history = await loadNotaHistory();
+            const index = history.findIndex(item => item.nomorInvoice === invoiceNumber);
+
+            if (index !== -1 && history[index].statusTransaksi === 'Proccess') {
+                const data = history[index];
+
+                if (data.isPaused && data.pauseTimeISO) {
+                    const pauseStart = new Date(data.pauseTimeISO).getTime();
+                    const pauseEnd = new Date().getTime();
+                    const pauseDurationMs = pauseEnd - pauseStart;
+
+                    const oldStartTime = new Date(data.currentDateTimeISO).getTime();
+                    const newStartTime = oldStartTime + pauseDurationMs;
+                    
+                    data.currentDateTimeISO = new Date(newStartTime).toISOString();
+                    data.currentDateTime = formatDateTime(data.currentDateTimeISO);
+                    data.isPaused = false;
+                    delete data.pauseTimeISO;
+                    
+                    if (await updateNotaOnServer(data)) {
+                        historyCache = history; // Update cache
+                        await renderNotaHistoryCards();
+                        showNotification(`Nota ${invoiceNumber} berhasil dilanjutkan.`, 'success');
+                    }
+                } else {
+                    showNotification('Nota tidak dalam status jeda.', 'warning');
+                }
+            }
+        }
+
+        // Fungsi changeStatusFromHistory dengan server update
+        async function changeStatusFromHistory(invoiceNumber, newStatus) {
+            let history = await loadNotaHistory();
+            const index = history.findIndex(item => item.nomorInvoice === invoiceNumber);
+
+            if (index !== -1) {
+                const oldData = history[index];
+                const nowISO = getCurrentDateTimeISO();
+                const nowFormatted = formatDateTime(nowISO);
+
+                oldData.statusTransaksi = newStatus;
+                
+                if (newStatus === 'Success') {
+                    oldData.completionDateTime = nowFormatted;
+                    oldData.isPaused = false;
+                    delete oldData.pauseTimeISO;
+                } else if (newStatus === 'Proccess') {
+                    if (oldData.isPaused) {
+                        await resumeNota(invoiceNumber);
+                        return;
+                    }
+                    oldData.completionDateTime = 'N/A';
+                    oldData.isPaused = false;
+                    delete oldData.pauseTimeISO;
+                } else {
+                    oldData.completionDateTime = 'N/A';
+                    oldData.isPaused = false;
+                    delete oldData.pauseTimeISO;
+                }
+                
+                if (await updateNotaOnServer(oldData)) {
+                    historyCache = history; // Update cache
+                    await renderNotaHistoryCards();
+                    showNotification(`Status Nota ${invoiceNumber} berhasil diubah menjadi ${newStatus}.`, 'success');
+                }
+            }
+        }
+
+        // Fungsi viewNotaFromHistory dengan server
+        async function viewNotaFromHistory(invoiceNumber) {
+            const dataToLoad = await getNotaByInvoice(invoiceNumber);
+
+            if (dataToLoad) {
+                FORM_ELEMENT_IDS.forEach(id => {
+                    const element = document.getElementById(id);
+                    if (element && dataToLoad[id] !== undefined) {
+                        element.value = dataToLoad[id];
+                    }
+                });
+                document.getElementById('currentNotaId').value = invoiceNumber;
+                document.getElementById('waktuPesananMasuk').value = dataToLoad.currentDateTime || 'N/A';
+                document.getElementById('waktuPesananSelesai').value = dataToLoad.completionDateTime || 'N/A';
+                updateNota(dataToLoad);
+                closeHistoryModal();
+                openReceiptModal();
+            } else {
+                showNotification('Nota tidak ditemukan.', 'error');
+            }
+        }
+
+        // Fungsi editNotaFromHistory dengan server
+        async function editNotaFromHistory(invoiceNumber) {
+            const dataToLoad = await getNotaByInvoice(invoiceNumber);
+            if (dataToLoad) {
+                FORM_ELEMENT_IDS.forEach(id => {
+                    const element = document.getElementById(id);
+                    if (element && dataToLoad[id] !== undefined) {
+                        element.value = dataToLoad[id];
+                    }
+                });
+                document.getElementById('waktuPesananMasuk').value = dataToLoad.currentDateTime || 'N/A';
+                document.getElementById('waktuPesananSelesai').value = dataToLoad.completionDateTime || 'N/A';
+                document.getElementById('currentNotaId').value = invoiceNumber;
+                closeHistoryModal();
+                openInputFormModal();
+            } else {
+                showNotification('Nota tidak ditemukan.', 'error');
+            }
+        }
+
+        // Fungsi renderNotaHistoryCards dengan server
+        async function renderNotaHistoryCards() {
+            try {
+                const history = await loadNotaHistory();
+                const sortedHistory = history.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+                const gridContainer = document.getElementById('historyGridContainer');
+                const noHistory = document.getElementById('noHistoryText');
+                
+                const fragment = document.createDocumentFragment();
+                
+                if (sortedHistory.length === 0) {
+                    noHistory.style.display = 'block';
+                    gridContainer.innerHTML = '';
+                    return;
+                }
+
+                noHistory.style.display = 'none';
+                
+                // ... Kode untuk membuat card tetap sama ...
+                // Hanya ubah event handlers untuk memanggil fungsi async
+                
+                gridContainer.innerHTML = '';
+                gridContainer.appendChild(fragment);
+                
+                updateEstimatedTimeDisplay();
+                filterHistory(currentFilterStatus);
+                
+            } catch (error) {
+                console.error('Error rendering history:', error);
+                showNotification('Gagal memuat riwayat transaksi', 'error');
+            }
+        }
+
+        // Fungsi deleteNota dengan server
+        async function deleteNota(invoiceNumber) {
+            if (confirm(`Apakah Anda yakin ingin menghapus Nota dengan Invoice ${invoiceNumber}?`)) {
+                if (await deleteNotaFromServer(invoiceNumber)) {
+                    // Update cache
+                    historyCache = historyCache.filter(item => item.nomorInvoice !== invoiceNumber);
+                    await renderNotaHistoryCards();
+                    
+                    showNotification(`Nota ${invoiceNumber} berhasil dihapus.`, 'success');
+                    
+                    if (document.getElementById('nomorInvoice').value === invoiceNumber) {
+                        clearFormAndResetMode();
+                    }
+                }
+            }
+        }
+
+        // Fungsi handleFormSubmit dengan server
+        async function handleFormSubmit(e) {
+            e.preventDefault();
+            closeInputFormModal();
+
+            let currentInvoiceNumber = document.getElementById('currentNotaId').value;
+            const isEditingExisting = !!currentInvoiceNumber && currentInvoiceNumber !== 'Akan Dibuat Otomatis';
+            
+            const nowISO = getCurrentDateTimeISO();
+            const nowFormatted = formatDateTime(nowISO);
+            
+            let newNotaData = {};
+            
+            FORM_ELEMENT_IDS.forEach(id => newNotaData[id] = document.getElementById(id).value);
+            newNotaData.timestamp = new Date().toISOString();
+            
+            let startISO;
+            
+            if (!isEditingExisting) {
+                currentInvoiceNumber = generateInvoiceNumber();
+                document.getElementById('nomorInvoice').value = currentInvoiceNumber;
+                newNotaData.nomorInvoice = currentInvoiceNumber;
+                startISO = nowISO;
+                newNotaData.currentDateTimeISO = startISO;
+                newNotaData.currentDateTime = nowFormatted;
+                newNotaData.isPaused = false;
+                
+                if (newNotaData.statusTransaksi === 'Success') {
+                    newNotaData.completionDateTime = nowFormatted;
+                } else {
+                    newNotaData.completionDateTime = 'N/A';
+                }
+                
+                // Simpan ke server
+                if (await saveNotaHistory(newNotaData)) {
+                    historyCache.push(newNotaData); // Update cache
+                } else {
+                    showNotification('Gagal menyimpan nota baru', 'error');
+                    return;
+                }
+                
+            } else {
+                // Ambil data dari server untuk diedit
+                const existingHistory = await loadNotaHistory();
+                const index = existingHistory.findIndex(item => item.nomorInvoice === currentInvoiceNumber);
+                
+                if (index !== -1) {
+                    const oldData = existingHistory[index];
+                    startISO = oldData.currentDateTimeISO || nowISO;
+                    newNotaData.currentDateTimeISO = startISO;
+                    newNotaData.currentDateTime = oldData.currentDateTime || formatDateTime(startISO);
+                    newNotaData.nomorInvoice = oldData.nomorInvoice;
+                    newNotaData.isPaused = oldData.isPaused || false;
+                    newNotaData.pauseTimeISO = oldData.pauseTimeISO || undefined;
+                    
+                    if (oldData.statusTransaksi === 'Success' && newNotaData.statusTransaksi === 'Success') {
+                        newNotaData.completionDateTime = oldData.completionDateTime;
+                    } else if (oldData.statusTransaksi !== 'Success' && newNotaData.statusTransaksi === 'Success') {
+                        newNotaData.completionDateTime = nowFormatted;
+                    } else {
+                        newNotaData.completionDateTime = 'N/A';
+                    }
+                    
+                    if (newNotaData.statusTransaksi !== 'Proccess') {
+                        newNotaData.isPaused = false;
+                        delete newNotaData.pauseTimeISO;
+                    }
+                    
+                    if (oldData.isPaused && newNotaData.statusTransaksi === 'Proccess') {
+                        const pauseStart = new Date(oldData.pauseTimeISO).getTime();
+                        const pauseEnd = new Date().getTime();
+                        const pauseDurationMs = pauseEnd - pauseStart;
+
+                        const oldStartTime = new Date(oldData.currentDateTimeISO).getTime();
+                        const newStartTime = oldStartTime + pauseDurationMs;
+                        
+                        newNotaData.currentDateTimeISO = new Date(newStartTime).toISOString();
+                        newNotaData.currentDateTime = formatDateTime(newNotaData.currentDateTimeISO);
+                        newNotaData.isPaused = false;
+                        delete newNotaData.pauseTimeISO;
+                    }
+
+                    // Update di server
+                    if (await updateNotaOnServer(newNotaData)) {
+                        historyCache[index] = newNotaData; // Update cache
+                    } else {
+                        showNotification('Gagal memperbarui nota', 'error');
+                        return;
+                    }
+                }
+            }
+            
+            document.getElementById('currentNotaId').value = currentInvoiceNumber;
+            document.getElementById('waktuPesananMasuk').value = newNotaData.currentDateTime;
+            document.getElementById('waktuPesananSelesai').value = newNotaData.completionDateTime;
+            updateNota(newNotaData);
+            openReceiptModal();
+            
+            showNotification(`Nota ${currentInvoiceNumber} berhasil disimpan!`, 'success');
+        }
+
+        // Fungsi loadNotaToForm dengan server
+        async function loadNotaToForm(invoiceNumber) {
+            const dataToLoad = await getNotaByInvoice(invoiceNumber);
+            if (dataToLoad) {
+                FORM_ELEMENT_IDS.forEach(id => {
+                    const element = document.getElementById(id);
+                    if (element && dataToLoad[id] !== undefined) {
+                        element.value = dataToLoad[id];
+                    }
+                });
+                document.getElementById('waktuPesananMasuk').value = dataToLoad.currentDateTime || 'N/A';
+                document.getElementById('waktuPesananSelesai').value = dataToLoad.completionDateTime || 'N/A';
+                document.getElementById('currentNotaId').value = invoiceNumber;
+            } else {
+                showNotification('Nota tidak ditemukan.', 'error');
+            }
+        }
+
+        // =================================================================
+        //                 FUNGSI MANAJEMEN MODAL (TETAP SAMA)
+        // =================================================================
+        // ... Semua fungsi modal tetap sama ...
+
+        // =================================================================
+        //                 FUNGSI UTILITAS (TETAP SAMA)
+        // =================================================================
+        // ... Semua fungsi utilitas tetap sama ...
+
+        // =================================================================
+        //                 FUNGSI UPDATE NOTA (TETAP SAMA)
+        // =================================================================
+        // ... Semua fungsi update nota tetap sama ...
+
+        // =================================================================
+        //                 FILTER & SEARCH (DIUBAH)
+        // =================================================================
+        function filterHistory(filterStatus = null, clickedButton = null) {
+            const cards = document.querySelectorAll('.history-card');
+            const noHistory = document.getElementById('noHistoryText');
+            
+            if (filterStatus) {
+                currentFilterStatus = filterStatus;
+                document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.remove('active'));
+                if (clickedButton) {
+                    clickedButton.classList.add('active');
+                } else {
+                    const activeBtn = document.querySelector(`.filter-btn.${currentFilterStatus}`);
+                    if (activeBtn) activeBtn.classList.add('active');
+                }
+            }
+            
+            const searchInput = document.getElementById('historySearchInput').value.toUpperCase();
+            let visibleCardCount = 0;
+
+            cards.forEach(card => {
+                const invoiceText = card.querySelector('.card-invoice').textContent || '';
+                const customerRow = card.querySelector('.card-row');
+                const customerText = customerRow ? customerRow.querySelector('.card-value').textContent || '' : '';
+                const cardStatus = card.getAttribute('data-status');
+                
+                const statusMatch = (currentFilterStatus === 'All' || cardStatus === currentFilterStatus);
+                const searchMatch = (invoiceText.toUpperCase().indexOf(searchInput) > -1 || 
+                                    customerText.toUpperCase().indexOf(searchInput) > -1);
+                
+                if (statusMatch && searchMatch) {
+                    card.style.display = 'block';
+                    visibleCardCount++;
+                } else {
+                    card.style.display = 'none';
+                }
+            });
+            
+            if (historyCache.length === 0) {
+                noHistory.style.display = 'block';
+                noHistory.innerHTML = `
+                    <div class="empty-icon">
+                        <i class="fas fa-clipboard-list"></i>
+                    </div>
+                    <h3 class="empty-title">Belum ada transaksi</h3>
+                    <p class="empty-text">Belum ada nota Joki Fish It yang tersimpan. Klik tombol "Buat Nota Baru" untuk memulai.</p>
+                `;
+            } else if (visibleCardCount === 0) {
+                noHistory.style.display = 'block';
+                noHistory.innerHTML = `
+                    <div class="empty-icon">
+                        <i class="fas fa-search"></i>
+                    </div>
+                    <h3 class="empty-title">Tidak ada hasil</h3>
+                    <p class="empty-text">Tidak ada nota yang cocok dengan kriteria filter/pencarian saat ini.</p>
+                `;
+            } else {
+                noHistory.style.display = 'none';
+            }
+        }
+
+        // =================================================================
+        //                 DOWNLOAD FUNCTION (TETAP SAMA)
+        // =================================================================
+        // ... Fungsi download tetap sama ...
+
+        // =================================================================
+        //                 FUNGSI NOTIFIKASI (TETAP SAMA)
+        // =================================================================
+        // ... Fungsi notifikasi tetap sama ...
+
+        // =================================================================
+        //                 INITIALIZATION (DIUBAH)
+        // =================================================================
+        window.onload = async function() {
+            console.log("SH Store Nota Generator (Cyberpunk Edition): Berhasil dimuat.");
+            
+            createParticles();
+            
+            // Inisialisasi cache
+            await loadNotaHistory();
+            
+            setupDownloadButton();
+            
+            // Event listeners untuk modal
+            document.getElementById('inputFormModal').addEventListener('click', (e) => {
+                if (e.target === document.getElementById('inputFormModal')) {
+                    closeInputFormModal();
+                }
+            });
+            
+            document.getElementById('receiptModal').addEventListener('click', (e) => {
+                if (e.target === document.getElementById('receiptModal')) {
+                    closeReceiptModal();
+                }
+            });
+            
+            document.getElementById('historyModal').addEventListener('click', (e) => {
+                if (e.target === document.getElementById('historyModal')) {
+                    closeHistoryModal();
+                }
+            });
+            
+            // Event listener untuk search
+            document.getElementById('historySearchInput').addEventListener('input', function() {
+                if (window.searchTimeout) {
+                    clearTimeout(window.searchTimeout);
+                }
+                
+                window.searchTimeout = setTimeout(() => {
+                    filterHistory();
+                }, 300);
+            });
+            
+            // Event listener untuk buka modal history
+            document.querySelector('.btn-futuristic.btn-secondary').addEventListener('click', async function() {
+                await renderNotaHistoryCards();
+                openHistoryModal();
+            });
+            
+            setTimeout(() => {
+                optimizedAnimationUpdate();
+            }, 2000);
+            
+            setTimeout(() => {
+                showNotification('Selamat datang di SH Store Nota Generator!', 'info');
+            }, 1000);
+        };
+    </script>
+</body>
+</html>
